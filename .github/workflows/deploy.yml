@@ -50,6 +50,7 @@ jobs:
             this.blogDir = '.'; // Look in root directory instead of 'blogs' folder
             this.processedBlogs = [];
             this.errors = [];
+            this.pageConnections = new Map(); // Track page relationships
           }
 
           async syncAllBlogs() {
@@ -69,14 +70,17 @@ jobs:
                 return;
               }
 
+              // Process each blog folder for multi-page content
               for (const filePath of blogFiles) {
                 try {
-                  await this.processBlog(filePath);
+                  await this.processBlogFolder(filePath);
                 } catch (error) {
                   console.error(`❌ Error processing ${filePath}:`, error.message);
                   this.errors.push({ file: filePath, error: error.message });
                 }
               }
+
+
 
               console.log(`✅ Successfully processed ${this.processedBlogs.length} blogs`);
               if (this.errors.length > 0) {
@@ -88,6 +92,114 @@ jobs:
               console.error('💥 Fatal error during sync:', error);
               process.exit(1);
             }
+          }
+
+          async processBlogFolder(readmePath) {
+            const blogFolder = path.dirname(readmePath);
+            console.log(`📁 Processing blog folder: ${blogFolder}`);
+
+            // Check for SUMMARY.md to detect multi-page structure
+            const summaryPath = path.join(blogFolder, 'SUMMARY.md');
+            const hasSummary = await this.fileExists(summaryPath);
+
+            if (hasSummary) {
+              console.log(`📑 Found SUMMARY.md - processing multi-page blog`);
+              await this.processMultiPageBlog(blogFolder, summaryPath);
+            } else {
+              console.log(`📄 Single page blog - processing README.md`);
+              await this.processBlog(readmePath);
+            }
+          }
+
+          async fileExists(filePath) {
+            try {
+              await fs.access(filePath);
+              return true;
+            } catch {
+              return false;
+            }
+          }
+
+          async processMultiPageBlog(blogFolder, summaryPath) {
+            try {
+              const summaryContent = await fs.readFile(summaryPath, 'utf-8');
+              const pages = this.parseSummary(summaryContent, blogFolder);
+              
+              // Combine all pages into a single blog post with navigation
+              let combinedContent = '';
+              let mainMetadata = null;
+              
+              for (let i = 0; i < pages.length; i++) {
+                const page = pages[i];
+                const pagePath = path.join(blogFolder, page.file);
+                
+                if (await this.fileExists(pagePath)) {
+                  const pageContent = await fs.readFile(pagePath, 'utf-8');
+                  const parsed = frontMatter(pageContent);
+                  
+                  // Use first page metadata as main metadata
+                  if (i === 0) {
+                    mainMetadata = this.extractMetadata(parsed, blogFolder);
+                  }
+                  
+                  // Add page title and content
+                  combinedContent += `\n\n# ${page.title}\n\n${parsed.body}\n\n`;
+                  
+                  // Add navigation
+                  if (i < pages.length - 1) {
+                    combinedContent += `\n\n---\n\n**Next: [${pages[i + 1].title}](#${this.createAnchor(pages[i + 1].title)})**\n\n`;
+                  }
+                  if (i > 0) {
+                    combinedContent += `\n\n**Previous: [${pages[i - 1].title}](#${this.createAnchor(pages[i - 1].title)})**\n\n`;
+                  }
+                }
+              }
+              
+              // Process assets in combined content
+              const processedContent = await this.processAssets(combinedContent, blogFolder, blogFolder);
+              
+              // Create slug from folder name
+              const slug = blogFolder.toLowerCase()
+                .replace(/[^a-z0-9 -]/g, '')
+                .replace(/\s+/g, '-')
+                .replace(/-+/g, '-')
+                .trim('-');
+              
+              await this.upsertBlog(mainMetadata, processedContent, slug, blogFolder);
+              
+              this.processedBlogs.push({
+                title: mainMetadata.title,
+                slug: slug,
+                folder: blogFolder,
+                pages: pages.length
+              });
+              
+            } catch (error) {
+              throw new Error(`Failed to process multi-page blog: ${error.message}`);
+            }
+          }
+
+          parseSummary(summaryContent, blogFolder) {
+            const pages = [];
+            const lines = summaryContent.split('\n');
+            
+            for (const line of lines) {
+              // Match GitBook summary format: * [Title](file.md)
+              const match = line.match(/\*\s*\[([^\]]+)\]\(([^)]+)\)/);
+              if (match) {
+                const [, title, file] = match;
+                pages.push({
+                  title: title.trim(),
+                  file: file.trim()
+                });
+              }
+            }
+            
+            return pages;
+          }
+
+          createAnchor(title) {
+            return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
           }
 
           async processBlog(filePath) {
@@ -150,24 +262,48 @@ jobs:
           async processAssets(content, blogFolderPath, blogFolder) {
             let processedContent = content;
             
+            // Handle GitBook-specific assets
+            processedContent = processedContent
+              // Convert GitBook asset paths
+              .replace(/\.gitbook\/assets\//g, `${GITHUB_RAW_BASE}/${blogFolder}/.gitbook/assets/`)
+              // Convert GitBook figure HTML to markdown
+              .replace(/<div align="left"><figure><img src="([^"]*)"[^>]*><figcaption><p>(.*?)<\/p><\/figcaption><\/figure>/g, '![$2]($1)')
+              .replace(/<figure><img src="([^"]*)"[^>]*><figcaption><p>(.*?)<\/p><\/figcaption><\/figure>/g, '![$2]($1)')
+              // Handle GitBook drawings
+              .replace(/<img[^>]*src="([^"]*)"[^>]*class="gitbook-drawing"[^>]*>/g, '![]($1)')
+              // Clean up any remaining HTML img tags
+              .replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/g, '![$2]($1)');
+            
+            // Process standard markdown images
             const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
             let match;
             
-            while ((match = imageRegex.exec(content)) !== null) {
+            while ((match = imageRegex.exec(processedContent)) !== null) {
               const [fullMatch, altText, imagePath] = match;
               
               if (imagePath.startsWith('http')) continue;
               
               try {
-                const githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath}`;
+                let githubAssetUrl;
+                
+                // Handle different asset path formats
+                if (imagePath.startsWith('./')) {
+                  githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath.substring(2)}`;
+                } else if (imagePath.startsWith('.gitbook/')) {
+                  githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath}`;
+                } else {
+                  githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath}`;
+                }
                 
                 const fileExtension = path.extname(imagePath).toLowerCase();
                 const isVideo = ['.mp4', '.webm', '.mov', '.avi'].includes(fileExtension);
+                const isDrawing = imagePath.includes('.excalidraw') || imagePath.includes('drawing');
                 
                 processedContent = processedContent.replace(fullMatch, 
                   `![${altText}](${githubAssetUrl})`);
                 
-                console.log(`${isVideo ? '📹' : '🖼️'} Using GitHub raw URL for: ${imagePath}`);
+                const emoji = isVideo ? '📹' : isDrawing ? '🎨' : '🖼️';
+                console.log(`${emoji} Using GitHub raw URL for: ${imagePath}`);
               } catch (error) {
                 console.warn(`⚠️  Could not process asset ${imagePath}:`, error.message);
               }
