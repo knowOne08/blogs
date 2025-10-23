@@ -19,7 +19,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
 
     - name: Install dependencies
       run: |
@@ -63,6 +63,12 @@ jobs:
               console.log(`📚 Found ${blogFiles.length} blog(s) to process`);
               console.log(`📁 Blog files found: ${blogFiles.join(', ')}`);
 
+              if (blogFiles.length === 0) {
+                console.log('⚠️  No blog files found. Make sure each blog folder has a README.md file.');
+                console.log('📂 Expected structure: YourBlogFolder/README.md');
+                return;
+              }
+
               for (const filePath of blogFiles) {
                 try {
                   await this.processBlog(filePath);
@@ -96,11 +102,18 @@ jobs:
             const metadata = this.extractMetadata(parsed, blogFolder);
             const processedContent = await this.processAssets(parsed.body, blogFolderPath, blogFolder);
             
-            await this.upsertBlog(metadata, processedContent, blogFolder);
+            // Create slug from folder name (handle special characters)
+            const slug = blogFolder.toLowerCase()
+              .replace(/[^a-z0-9 -]/g, '')
+              .replace(/\s+/g, '-')
+              .replace(/-+/g, '-')
+              .trim('-');
+            
+            await this.upsertBlog(metadata, processedContent, slug);
             
             this.processedBlogs.push({
               title: metadata.title,
-              slug: blogFolder,
+              slug: slug,
               folder: blogFolderPath
             });
           }
