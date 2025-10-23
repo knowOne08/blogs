@@ -3,7 +3,7 @@ name: Sync Blogs to Portfolio
 on:
   push:
     branches: [ main ]
-    paths: [ 'blogs/**' ]
+    # Remove path restriction to trigger on any change for now
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -47,7 +47,7 @@ jobs:
 
         class GitBookBlogSync {
           constructor() {
-            this.blogDir = 'blogs';
+            this.blogDir = '.'; // Look in root directory instead of 'blogs' folder
             this.processedBlogs = [];
             this.errors = [];
           }
@@ -56,8 +56,12 @@ jobs:
             try {
               console.log('🚀 Starting GitBook blog sync...');
               
-              const blogFiles = glob.sync(`${this.blogDir}/*/README.md`);
+              // Find README.md files in root-level folders (excluding .github and node_modules)
+              const blogFiles = glob.sync('*/README.md', {
+                ignore: ['.github/**', 'node_modules/**', '.git/**']
+              });
               console.log(`📚 Found ${blogFiles.length} blog(s) to process`);
+              console.log(`📁 Blog files found: ${blogFiles.join(', ')}`);
 
               for (const filePath of blogFiles) {
                 try {
@@ -142,7 +146,7 @@ jobs:
               if (imagePath.startsWith('http')) continue;
               
               try {
-                const githubAssetUrl = `${GITHUB_RAW_BASE}/blogs/${blogFolder}/${imagePath}`;
+                const githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath}`;
                 
                 const fileExtension = path.extname(imagePath).toLowerCase();
                 const isVideo = ['.mp4', '.webm', '.mov', '.avi'].includes(fileExtension);
