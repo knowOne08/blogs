@@ -125,10 +125,9 @@ jobs:
               const summaryContent = await fs.readFile(summaryPath, 'utf-8');
               const pages = this.parseSummary(summaryContent, blogFolder);
               
-              // Combine all pages into a single blog post with navigation
-              let combinedContent = '';
-              let mainMetadata = null;
+              console.log(`📖 Processing ${pages.length} pages for ${blogFolder}`);
               
+              // Process each page as a separate blog post with navigation
               for (let i = 0; i < pages.length; i++) {
                 const page = pages[i];
                 const pagePath = path.join(blogFolder, page.file);
@@ -137,46 +136,64 @@ jobs:
                   const pageContent = await fs.readFile(pagePath, 'utf-8');
                   const parsed = frontMatter(pageContent);
                   
-                  // Use first page metadata as main metadata
-                  if (i === 0) {
-                    mainMetadata = this.extractMetadata(parsed, blogFolder);
-                  }
+                  // Extract metadata for this page
+                  const metadata = this.extractMetadata(parsed, blogFolder);
                   
-                  // Add page title and content
-                  combinedContent += `\n\n# ${page.title}\n\n${parsed.body}\n\n`;
+                  // Override title to include page info
+                  metadata.title = `${metadata.title} - ${page.title}`;
                   
-                  // Add navigation
-                  if (i < pages.length - 1) {
-                    combinedContent += `\n\n---\n\n**Next: [${pages[i + 1].title}](#${this.createAnchor(pages[i + 1].title)})**\n\n`;
-                  }
+                  // Add navigation to content
+                  let contentWithNav = parsed.body;
+                  
+                  // Add navigation at the bottom
+                  contentWithNav += '\n\n---\n\n';
+                  
                   if (i > 0) {
-                    combinedContent += `\n\n**Previous: [${pages[i - 1].title}](#${this.createAnchor(pages[i - 1].title)})**\n\n`;
+                    const prevSlug = this.createPageSlug(blogFolder, i - 1);
+                    contentWithNav += `⬅️ **Previous: [${pages[i - 1].title}](/blog/${prevSlug})**\n\n`;
                   }
+                  
+                  if (i < pages.length - 1) {
+                    const nextSlug = this.createPageSlug(blogFolder, i + 1);
+                    contentWithNav += `➡️ **Next: [${pages[i + 1].title}](/blog/${nextSlug})**\n\n`;
+                  }
+                  
+                  // Add series info
+                  contentWithNav += `📚 **Part ${i + 1} of ${pages.length} in "${blogFolder}" series**\n\n`;
+                  
+                  // Process assets
+                  const processedContent = await this.processAssets(contentWithNav, blogFolder, blogFolder);
+                  
+                  // Create unique slug for this page
+                  const pageSlug = this.createPageSlug(blogFolder, i);
+                  
+                  await this.upsertBlog(metadata, processedContent, pageSlug, blogFolder);
+                  
+                  this.processedBlogs.push({
+                    title: metadata.title,
+                    slug: pageSlug,
+                    folder: blogFolder,
+                    pageIndex: i,
+                    totalPages: pages.length
+                  });
+                  
+                  console.log(`📄 Processed page ${i + 1}/${pages.length}: ${page.title}`);
                 }
               }
-              
-              // Process assets in combined content
-              const processedContent = await this.processAssets(combinedContent, blogFolder, blogFolder);
-              
-              // Create slug from folder name
-              const slug = blogFolder.toLowerCase()
-                .replace(/[^a-z0-9 -]/g, '')
-                .replace(/\s+/g, '-')
-                .replace(/-+/g, '-')
-                .trim('-');
-              
-              await this.upsertBlog(mainMetadata, processedContent, slug, blogFolder);
-              
-              this.processedBlogs.push({
-                title: mainMetadata.title,
-                slug: slug,
-                folder: blogFolder,
-                pages: pages.length
-              });
               
             } catch (error) {
               throw new Error(`Failed to process multi-page blog: ${error.message}`);
             }
+          }
+
+          createPageSlug(blogFolder, pageIndex) {
+            const baseSlug = blogFolder.toLowerCase()
+              .replace(/[^a-z0-9 -]/g, '')
+              .replace(/\s+/g, '-')
+              .replace(/-+/g, '-')
+              .trim('-');
+            
+            return pageIndex === 0 ? baseSlug : `${baseSlug}-part-${pageIndex + 1}`;
           }
 
           parseSummary(summaryContent, blogFolder) {
@@ -221,7 +238,7 @@ jobs:
               .replace(/-+/g, '-')
               .trim('-');
             
-            await this.upsertBlog(metadata, processedContent, slug);
+            await this.upsertBlog(metadata, processedContent, slug, blogFolder);
             
             this.processedBlogs.push({
               title: metadata.title,
@@ -262,17 +279,17 @@ jobs:
           async processAssets(content, blogFolderPath, blogFolder) {
             let processedContent = content;
             
-            // Handle GitBook-specific assets
+            // Handle GitBook-specific assets - fix URL encoding issue
             processedContent = processedContent
-              // Convert GitBook asset paths
-              .replace(/\.gitbook\/assets\//g, `${GITHUB_RAW_BASE}/${blogFolder}/.gitbook/assets/`)
-              // Convert GitBook figure HTML to markdown
+              // Convert GitBook figure HTML to markdown first
               .replace(/<div align="left"><figure><img src="([^"]*)"[^>]*><figcaption><p>(.*?)<\/p><\/figcaption><\/figure>/g, '![$2]($1)')
               .replace(/<figure><img src="([^"]*)"[^>]*><figcaption><p>(.*?)<\/p><\/figcaption><\/figure>/g, '![$2]($1)')
               // Handle GitBook drawings
               .replace(/<img[^>]*src="([^"]*)"[^>]*class="gitbook-drawing"[^>]*>/g, '![]($1)')
               // Clean up any remaining HTML img tags
-              .replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/g, '![$2]($1)');
+              .replace(/<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>/g, '![$2]($1)')
+              // Convert GitBook asset paths (encode folder name properly)
+              .replace(/\.gitbook\/assets\//g, `${GITHUB_RAW_BASE}/${encodeURIComponent(blogFolder)}/.gitbook/assets/`);
             
             // Process standard markdown images
             const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
@@ -286,13 +303,18 @@ jobs:
               try {
                 let githubAssetUrl;
                 
-                // Handle different asset path formats
+                // Handle different asset path formats with proper URL encoding
+                const encodedBlogFolder = encodeURIComponent(blogFolder);
+                
                 if (imagePath.startsWith('./')) {
-                  githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath.substring(2)}`;
+                  githubAssetUrl = `${GITHUB_RAW_BASE}/${encodedBlogFolder}/${imagePath.substring(2)}`;
                 } else if (imagePath.startsWith('.gitbook/')) {
-                  githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath}`;
+                  githubAssetUrl = `${GITHUB_RAW_BASE}/${encodedBlogFolder}/${imagePath}`;
+                } else if (!imagePath.startsWith('http')) {
+                  githubAssetUrl = `${GITHUB_RAW_BASE}/${encodedBlogFolder}/${imagePath}`;
                 } else {
-                  githubAssetUrl = `${GITHUB_RAW_BASE}/${blogFolder}/${imagePath}`;
+                  // Skip if already a full URL
+                  continue;
                 }
                 
                 const fileExtension = path.extname(imagePath).toLowerCase();
@@ -312,7 +334,7 @@ jobs:
             return processedContent;
           }
 
-          async upsertBlog(metadata, content, slug) {
+          async upsertBlog(metadata, content, slug, githubFolder = null) {
             try {
               const { data: existing } = await supabase
                 .from('blogs')
@@ -331,7 +353,7 @@ jobs:
                 slug: slug,
                 status: metadata.status,
                 github_synced: true,
-                github_folder: slug,
+                github_folder: githubFolder || slug,
                 updated_at: new Date().toISOString()
               };
 
