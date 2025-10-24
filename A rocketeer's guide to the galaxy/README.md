@@ -1,6 +1,8 @@
 ---
 description: Introduction
-cover: .gitbook/assets/2001_space_art.jpg
+cover:
+  light: .gitbook/assets/2001_space_art.jpg
+  dark: .gitbook/assets/2001_space_art.jpg
 coverY: 0
 layout:
   width: default
