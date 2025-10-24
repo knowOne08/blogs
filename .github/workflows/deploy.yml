@@ -1,9 +1,30 @@
+# ========================================
+# Final GitHub Actions Workflow
+# ========================================
+# 
+# Save this as `.github/workflows/sync-blogs.yml` 
+# in your GitBook blog repository (external repo with blog content)
+#
+# This workflow will:
+# 1. Find all README.md files in blog folders
+# 2. Extract frontmatter metadata (title, description, tags, etc.)
+# 3. Process blog content and keep image paths as-is
+# 4. Sync everything to your Supabase database
+#
+# Required Secrets in your GitBook repo:
+# - SUPABASE_URL: Your Supabase project URL
+# - SUPABASE_SERVICE_KEY: Your Supabase service role key
+#
+# ========================================
 
 name: Sync Blogs to Portfolio
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
+    paths:
+      - '**/*.md'
+      - '**/.gitbook/**'
   workflow_dispatch:
 
 jobs:
@@ -11,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repo
+    - name: Checkout repository
       uses: actions/checkout@v4
 
     - name: Setup Node.js
@@ -20,9 +41,11 @@ jobs:
         node-version: '20'
 
     - name: Install dependencies
-      run: npm install @supabase/supabase-js front-matter glob
+      run: |
+        npm init -y
+        npm install @supabase/supabase-js front-matter glob
 
-    - name: Sync blogs
+    - name: Sync blogs to Supabase
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -36,36 +59,91 @@ jobs:
         const glob = require('glob');
 
         const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-        const BASE = \`https://raw.githubusercontent.com/\${process.env.GITHUB_REPOSITORY}/main\`;
 
         (async () => {
-          const files = glob.sync('*/README.md', { ignore: ['.github/**', 'node_modules/**'] });
-          console.log(\`📚 Found \${files.length} blogs\`);
-          
-          for (const file of files) {
-            const folder = path.dirname(file);
-            const content = await fs.readFile(file, 'utf-8');
-            const { attributes, body } = frontMatter(content);
+          try {
+            // Find all README.md files (GitBook format)
+            const files = glob.sync('*/README.md', { 
+              ignore: ['.github/**', 'node_modules/**', '.git/**'] 
+            });
             
-            const title = attributes.title || folder.replace(/-/g, ' ');
-            const slug = folder.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+            console.log(\`📚 Found \${files.length} blog(s) to sync\`);
             
-            const blogData = {
-              title,
-              excerpt: attributes.excerpt || '',
-              content: body,
-              date: attributes.date || new Date().toISOString().split('T')[0],
-              read_time: \`\${Math.ceil(body.split(/\s+/).length / 200)} min read\`,
-              tags: JSON.stringify(attributes.tags || []),
-              featured: attributes.featured || false,
-              slug,
-              status: attributes.status || 'published',
-              updated_at: new Date().toISOString()
-            };
+            for (const file of files) {
+              try {
+                const folder = path.dirname(file);
+                const content = await fs.readFile(file, 'utf-8');
+                const { attributes, body } = frontMatter(content);
+                
+                // Extract title from frontmatter or first heading
+                let title = attributes.title;
+                if (!title) {
+                  const titleMatch = body.match(/^#\s+(.+)$/m);
+                  title = titleMatch ? titleMatch[1] : folder.replace(/-/g, ' ');
+                }
+                
+                // Use description from frontmatter as excerpt
+                let excerpt = attributes.description || attributes.excerpt || '';
+                if (!excerpt) {
+                  // Fallback: extract first paragraph
+                  const withoutHeadings = body.replace(/^#+\s+.+$/gm, '').trim();
+                  const firstParagraph = withoutHeadings.split('\\n\\n')[0];
+                  if (firstParagraph) {
+                    excerpt = firstParagraph
+                      .replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, '\$1')
+                      .replace(/[*_\`]/g, '')
+                      .replace(/^>\\s*/gm, '')
+                      .trim();
+                    if (excerpt.length > 200) {
+                      excerpt = excerpt.substring(0, 200).trim() + '...';
+                    }
+                  }
+                }
+                
+                // Generate slug and reading time
+                const slug = folder.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+                const wordCount = body.split(/\\s+/).length;
+                const readTime = Math.ceil(wordCount / 200);
+                
+                const blogData = {
+                  title: title.trim(),
+                  excerpt: excerpt.trim(),
+                  content: body,
+                  date: attributes.date || new Date().toISOString().split('T')[0],
+                  read_time: \`\${readTime} min read\`,
+                  tags: JSON.stringify(attributes.tags || []),
+                  featured: attributes.featured || false,
+                  slug: slug,
+                  status: attributes.status || 'published',
+                  github_folder_name: folder,
+                  updated_at: new Date().toISOString()
+                };
+                
+                const { error } = await supabase
+                  .from('blogs')
+                  .upsert(blogData, { onConflict: 'slug' });
+                
+                if (error) {
+                  console.error(\`❌ Error syncing '\${title}': \${error.message}\`);
+                } else {
+                  console.log(\`✅ Synced: \${title}\`);
+                }
+              } catch (fileError) {
+                console.error(\`❌ Error processing \${file}: \${fileError.message}\`);
+              }
+            }
             
-            const { error } = await supabase.from('blogs').upsert(blogData, { onConflict: 'slug' });
-            if (error) console.error('❌', error);
-            else console.log('✅', title);
+            console.log(\`\\n🎉 Sync complete!\`);
+          } catch (error) {
+            console.error(\`💥 Fatal error: \${error.message}\`);
+            process.exit(1);
           }
         })();
         "
+
+    - name: Summary
+      run: |
+        echo "## Blog Sync Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Timestamp: $(date)" >> $GITHUB_STEP_SUMMARY
