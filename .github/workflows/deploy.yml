@@ -248,9 +248,8 @@ jobs:
           }
 
           extractMetadata(parsed, blogFolder) {
-            const { attributes, body } = parsed;
-            console.log(attributes);
-            console.log(body);
+            const { attributes, body, frontmatter } = parsed;
+            
             let title = attributes.title;
             if (!title) {
               const titleMatch = body.match(/^#\s+(.+)$/m);
@@ -266,10 +265,44 @@ jobs:
             const wordCount = body.split(/\s+/).length;
             const readTime = Math.ceil(wordCount / 200);
             
-            // Extract cover art information from GitBook frontmatter
-            const cover = attributes.cover || {};
-            const layout = attributes.layout || {};
-            const coverConfig = layout.cover || {};
+            // Parse cover art from frontmatter text (GitBook YAML format)
+            let coverLight = null;
+            let coverDark = null;
+            let coverY = 0;
+            let coverVisible = true;
+            let coverSize = 'hero';
+            
+            if (frontmatter) {
+              // Extract cover.light
+              const lightMatch = frontmatter.match(/cover:\s*\n\s+light:\s*>?-?\s*\n?\s*(.+?)(?:\n|$)/s);
+              if (lightMatch) {
+                coverLight = lightMatch[1].trim();
+              }
+              
+              // Extract cover.dark
+              const darkMatch = frontmatter.match(/dark:\s*>?-?\s*\n?\s*(.+?)(?:\n|$)/s);
+              if (darkMatch) {
+                coverDark = darkMatch[1].trim();
+              }
+              
+              // Extract coverY
+              const coverYMatch = frontmatter.match(/coverY:\s*(-?\d+)/);
+              if (coverYMatch) {
+                coverY = parseInt(coverYMatch[1], 10);
+              }
+              
+              // Extract layout.cover.visible
+              const visibleMatch = frontmatter.match(/cover:\s*\n\s+visible:\s*(true|false)/);
+              if (visibleMatch) {
+                coverVisible = visibleMatch[1] === 'true';
+              }
+              
+              // Extract layout.cover.size
+              const sizeMatch = frontmatter.match(/size:\s*(hero|full|small)/);
+              if (sizeMatch) {
+                coverSize = sizeMatch[1];
+              }
+            }
             
             return {
               title: title.trim(),
@@ -279,12 +312,12 @@ jobs:
               date: attributes.date || new Date().toISOString().split('T')[0],
               read_time: `${readTime} min read`,
               status: attributes.status || 'published',
-              // Cover art fields
-              cover_light: cover.light || null,
-              cover_dark: cover.dark || null,
-              cover_y: attributes.coverY || 0,
-              cover_visible: coverConfig.visible !== false, // Default true
-              cover_size: coverConfig.size || 'hero' // hero, full, or small
+              // Cover art fields (parsed from YAML text)
+              cover_light: coverLight,
+              cover_dark: coverDark,
+              cover_y: coverY,
+              cover_visible: coverVisible,
+              cover_size: coverSize
             };
           }
 
@@ -387,7 +420,7 @@ jobs:
                 slug: slug,
                 status: metadata.status,
                 github_synced: true,
-                github_folder: githubFolder || slug,
+                github_folder_name: githubFolder || slug,
                 // Cover art fields
                 cover_light: metadata.cover_light,
                 cover_dark: metadata.cover_dark,
