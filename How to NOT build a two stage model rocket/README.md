@@ -1,5 +1,28 @@
 ---
 description: When engineering meets ambition… and occasionally, the ground
+cover:
+  light: >-
+    https://images.unsplash.com/photo-1484589065579-248aad0d8b13?crop=entropy&cs=srgb&fm=jpg&ixid=M3wxOTcwMjR8MHwxfHNlYXJjaHwzfHxzcGFjZXxlbnwwfHx8fDE3NjEyODc3Nzl8MA&ixlib=rb-4.1.0&q=85
+  dark: >-
+    https://images.unsplash.com/photo-1537420327992-d6e192287183?crop=entropy&cs=srgb&fm=jpg&ixid=M3wxOTcwMjR8MHwxfHNlYXJjaHwyfHxzcGFjZXxlbnwwfHx8fDE3NjEyODc3Nzl8MA&ixlib=rb-4.1.0&q=85
+coverY: 0
+layout:
+  width: default
+  cover:
+    visible: true
+    size: hero
+  title:
+    visible: true
+  description:
+    visible: true
+  tableOfContents:
+    visible: true
+  outline:
+    visible: true
+  pagination:
+    visible: true
+  metadata:
+    visible: true
 ---
 
 # How to NOT build a two stage model rocket
