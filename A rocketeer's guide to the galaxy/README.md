@@ -1,8 +1,27 @@
 ---
 description: Introduction
+cover: .gitbook/assets/2001_space_art.jpg
+coverY: 0
+layout:
+  width: default
+  cover:
+    visible: true
+    size: hero
+  title:
+    visible: true
+  description:
+    visible: true
+  tableOfContents:
+    visible: true
+  outline:
+    visible: true
+  pagination:
+    visible: true
+  metadata:
+    visible: true
 ---
 
-# Introduction to Avionics and Guidance Systems.
+# Introduction to Avionics and Guidance Systems
 
 #### What is Avionics and Guidance system in Rockets?
 
