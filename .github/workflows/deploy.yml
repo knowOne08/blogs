@@ -247,16 +247,115 @@ jobs:
             });
           }
 
-          extractMetadata(parsed, blogFolder) {
-            const { attributes, body, frontmatter } = parsed;
+          getFrontmatterBlock(mdText) {
+            const m = mdText.match(/^---\s*\n([\s\S]*?)\n---/);
+            return m ? m[1] : null;
+          }
+
+          parseCoverAndBasic(frontYaml) {
+            if (!frontYaml) return null;
+
+            const lines = frontYaml.split('\n');
+            let i = 0;
+            const result = {};
             
-            let title = attributes.title;
+            while (i < lines.length) {
+              const line = lines[i];
+              const topKeyMatch = line.match(/^([^\s:]+):\s*(.*)$/);
+              
+              if (topKeyMatch) {
+                const key = topKeyMatch[1];
+                const rest = topKeyMatch[2];
+
+                if (key === 'cover') {
+                  // collect indented cover lines
+                  const cover = {};
+                  i++;
+                  while (i < lines.length && /^\s{2,}/.test(lines[i])) {
+                    const covMatch = lines[i].trim().match(/^([^\s:]+):\s*>\-\s*$/);
+                    if (covMatch) {
+                      const subKey = covMatch[1];
+                      i++;
+                      // gather following non-empty line(s) that look like a URL
+                      let urlLine = '';
+                      while (i < lines.length && lines[i].trim() === '') i++;
+                      if (i < lines.length) {
+                        urlLine = lines[i].trim();
+                      }
+                      cover[subKey] = urlLine;
+                    } else {
+                      // fallback: try simple "key: value" inside cover
+                      const kv = lines[i].trim().match(/^([^:]+):\s*(.+)$/);
+                      if (kv) cover[kv[1]] = kv[2];
+                    }
+                    i++;
+                  }
+                  result.cover = cover;
+                  continue;
+                } else if (key === 'layout') {
+                  // collect layout block
+                  const layout = {};
+                  i++;
+                  while (i < lines.length && /^\s{2,}/.test(lines[i])) {
+                    const layoutMatch = lines[i].trim().match(/^([^\s:]+):\s*(.*)$/);
+                    if (layoutMatch) {
+                      const layoutKey = layoutMatch[1];
+                      const layoutRest = layoutMatch[2];
+                      
+                      if (layoutKey === 'cover' && layoutRest === '') {
+                        // nested cover config
+                        const coverConfig = {};
+                        i++;
+                        while (i < lines.length && /^\s{4,}/.test(lines[i])) {
+                          const covConfigMatch = lines[i].trim().match(/^([^:]+):\s*(.+)$/);
+                          if (covConfigMatch) {
+                            const val = covConfigMatch[2];
+                            coverConfig[covConfigMatch[1]] = val === 'true' ? true : val === 'false' ? false : val;
+                          }
+                          i++;
+                        }
+                        layout.cover = coverConfig;
+                        continue;
+                      } else {
+                        layout[layoutKey] = layoutRest;
+                      }
+                    }
+                    i++;
+                  }
+                  result.layout = layout;
+                  continue;
+                } else {
+                  // simple top-level key
+                  if (rest !== '') {
+                    const val = rest.trim();
+                    const num = Number(val);
+                    result[key] = isNaN(num) ? val : num;
+                  } else {
+                    result[key] = '';
+                  }
+                }
+              }
+              i++;
+            }
+
+            return result;
+          }
+
+          extractMetadata(parsed, blogFolder) {
+            const { attributes, body } = parsed;
+            
+            // Get raw frontmatter text for custom parsing
+            const fullContent = parsed.frontmatter || '';
+            const frontYaml = this.getFrontmatterBlock('---\n' + fullContent + '\n---');
+            const parsedFront = this.parseCoverAndBasic(frontYaml) || {};
+            
+            let title = attributes.title || parsedFront.title;
             if (!title) {
               const titleMatch = body.match(/^#\s+(.+)$/m);
               title = titleMatch ? titleMatch[1] : blogFolder.replace(/-/g, ' ');
             }
             
-            let excerpt = attributes.excerpt || attributes.description;
+            let excerpt = attributes.excerpt || attributes.description || parsedFront.description;
             if (!excerpt) {
               const paragraphMatch = body.match(/^(?!#)(.+)$/m);
               excerpt = paragraphMatch ? paragraphMatch[1].substring(0, 200) + '...' : '';
@@ -265,44 +364,10 @@ jobs:
             const wordCount = body.split(/\s+/).length;
             const readTime = Math.ceil(wordCount / 200);
             
-            // Parse cover art from frontmatter text (GitBook YAML format)
-            let coverLight = null;
-            let coverDark = null;
-            let coverY = 0;
-            let coverVisible = true;
-            let coverSize = 'hero';
-            
-            if (frontmatter) {
-              // Extract cover.light
-              const lightMatch = frontmatter.match(/cover:\s*\n\s+light:\s*>?-?\s*\n?\s*(.+?)(?:\n|$)/s);
-              if (lightMatch) {
-                coverLight = lightMatch[1].trim();
-              }
-              
-              // Extract cover.dark
-              const darkMatch = frontmatter.match(/dark:\s*>?-?\s*\n?\s*(.+?)(?:\n|$)/s);
-              if (darkMatch) {
-                coverDark = darkMatch[1].trim();
-              }
-              
-              // Extract coverY
-              const coverYMatch = frontmatter.match(/coverY:\s*(-?\d+)/);
-              if (coverYMatch) {
-                coverY = parseInt(coverYMatch[1], 10);
-              }
-              
-              // Extract layout.cover.visible
-              const visibleMatch = frontmatter.match(/cover:\s*\n\s+visible:\s*(true|false)/);
-              if (visibleMatch) {
-                coverVisible = visibleMatch[1] === 'true';
-              }
-              
-              // Extract layout.cover.size
-              const sizeMatch = frontmatter.match(/size:\s*(hero|full|small)/);
-              if (sizeMatch) {
-                coverSize = sizeMatch[1];
-              }
-            }
+            // Extract cover art from parsed frontmatter
+            const cover = parsedFront.cover || {};
+            const layout = parsedFront.layout || {};
+            const coverConfig = layout.cover || {};
             
             return {
               title: title.trim(),
@@ -312,12 +377,12 @@ jobs:
               date: attributes.date || new Date().toISOString().split('T')[0],
               read_time: `${readTime} min read`,
               status: attributes.status || 'published',
-              // Cover art fields (parsed from YAML text)
-              cover_light: coverLight,
-              cover_dark: coverDark,
-              cover_y: coverY,
-              cover_visible: coverVisible,
-              cover_size: coverSize
+              // Cover art fields (parsed from YAML)
+              cover_light: cover.light || null,
+              cover_dark: cover.dark || null,
+              cover_y: parsedFront.coverY || 0,
+              cover_visible: coverConfig.visible !== false,
+              cover_size: coverConfig.size || 'hero'
             };
           }
 
