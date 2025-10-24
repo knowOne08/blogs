@@ -122,64 +122,61 @@ jobs:
 
           async processMultiPageBlog(blogFolder, summaryPath) {
             try {
+              // Read README.md for blog metadata
+              const readmePath = path.join(blogFolder, 'README.md');
+              const readmeContent = await fs.readFile(readmePath, 'utf-8');
+              const readmeParsed = frontMatter(readmeContent);
+              
+              // Extract blog metadata
+              const blogMetadata = this.extractMetadata(readmeParsed, blogFolder);
+              
+              // Parse SUMMARY.md for pages
               const summaryContent = await fs.readFile(summaryPath, 'utf-8');
               const pages = this.parseSummary(summaryContent, blogFolder);
               
-              console.log(`📖 Processing ${pages.length} pages for ${blogFolder}`);
+              console.log(`📖 Processing multi-page blog with ${pages.length} pages`);
               
-              // Process each page as a separate blog post with navigation
+              // Create slug from folder name
+              const slug = blogFolder.toLowerCase()
+                .replace(/[^a-z0-9 -]/g, '')
+                .replace(/\s+/g, '-')
+                .replace(/-+/g, '-')
+                .trim('-');
+              
+              // Create/update the main blog entry
+              const blog = await this.upsertBlog(blogMetadata, readmeParsed.body, slug, blogFolder, true, pages.length);
+              
+              // Now create/update all blog_pages
               for (let i = 0; i < pages.length; i++) {
                 const page = pages[i];
                 const pagePath = path.join(blogFolder, page.file);
                 
                 if (await this.fileExists(pagePath)) {
                   const pageContent = await fs.readFile(pagePath, 'utf-8');
-                  const parsed = frontMatter(pageContent);
+                  const pageParsed = frontMatter(pageContent);
                   
-                  // Extract metadata for this page
-                  const metadata = this.extractMetadata(parsed, blogFolder);
+                  // Process page content
+                  const processedContent = await this.processAssets(pageParsed.body, blogFolder, blogFolder);
                   
-                  // Override title to include page info
-                  metadata.title = `${metadata.title} - ${page.title}`;
+                  // Create page slug from filename
+                  const pageSlug = page.file.replace('.md', '').toLowerCase()
+                    .replace(/[^a-z0-9 -]/g, '')
+                    .replace(/\s+/g, '-')
+                    .replace(/-+/g, '-')
+                    .trim('-');
                   
-                  // Add navigation to content
-                  let contentWithNav = parsed.body;
+                  await this.upsertBlogPage(blog.id, page.title, pageSlug, i, processedContent);
                   
-                  // Add navigation at the bottom
-                  contentWithNav += '\n\n---\n\n';
-                  
-                  if (i > 0) {
-                    const prevSlug = this.createPageSlug(blogFolder, i - 1);
-                    contentWithNav += `⬅️ **Previous: [${pages[i - 1].title}](/blog/${prevSlug})**\n\n`;
-                  }
-                  
-                  if (i < pages.length - 1) {
-                    const nextSlug = this.createPageSlug(blogFolder, i + 1);
-                    contentWithNav += `➡️ **Next: [${pages[i + 1].title}](/blog/${nextSlug})**\n\n`;
-                  }
-                  
-                  // Add series info
-                  contentWithNav += `📚 **Part ${i + 1} of ${pages.length} in "${blogFolder}" series**\n\n`;
-                  
-                  // Process assets
-                  const processedContent = await this.processAssets(contentWithNav, blogFolder, blogFolder);
-                  
-                  // Create unique slug for this page
-                  const pageSlug = this.createPageSlug(blogFolder, i);
-                  
-                  await this.upsertBlog(metadata, processedContent, pageSlug, blogFolder);
-                  
-                  this.processedBlogs.push({
-                    title: metadata.title,
-                    slug: pageSlug,
-                    folder: blogFolder,
-                    pageIndex: i,
-                    totalPages: pages.length
-                  });
-                  
-                  console.log(`📄 Processed page ${i + 1}/${pages.length}: ${page.title}`);
+                  console.log(`  ✅ Page ${i + 1}/${pages.length}: ${page.title}`);
                 }
               }
+              
+              this.processedBlogs.push({
+                title: blogMetadata.title,
+                slug: slug,
+                folder: blogFolder,
+                pageCount: pages.length
+              });
               
             } catch (error) {
               throw new Error(`Failed to process multi-page blog: ${error.message}`);
@@ -238,7 +235,8 @@ jobs:
               .replace(/-+/g, '-')
               .trim('-');
             
-            await this.upsertBlog(metadata, processedContent, slug, blogFolder);
+            // Single-page blog: is_multipage = false, page_count = 1
+            await this.upsertBlog(metadata, processedContent, slug, blogFolder, false, 1);
             
             this.processedBlogs.push({
               title: metadata.title,
@@ -466,7 +464,7 @@ jobs:
             return processedContent;
           }
 
-          async upsertBlog(metadata, content, slug, githubFolder = null) {
+          async upsertBlog(metadata, content, slug, githubFolder = null, isMultipage = false, pageCount = 1) {
             try {
               const { data: existing } = await supabase
                 .from('blogs')
@@ -485,14 +483,16 @@ jobs:
                 featured: metadata.featured,
                 slug: slug,
                 status: metadata.status,
+                is_multipage: isMultipage,
+                page_count: pageCount,
                 updated_at: new Date().toISOString()
               };
 
               // Add cover art fields if they exist
-              if (metadata.cover_light !== undefined) {
+              if (metadata.cover_light !== undefined && metadata.cover_light !== null) {
                 blogData.cover_light = metadata.cover_light;
               }
-              if (metadata.cover_dark !== undefined) {
+              if (metadata.cover_dark !== undefined && metadata.cover_dark !== null) {
                 blogData.cover_dark = metadata.cover_dark;
               }
               if (metadata.cover_y !== undefined) {
@@ -506,23 +506,66 @@ jobs:
               }
 
               if (existing) {
-                const { error } = await supabase
+                const { data, error } = await supabase
                   .from('blogs')
                   .update(blogData)
-                  .eq('id', existing.id);
+                  .eq('id', existing.id)
+                  .select()
+                  .single();
                 
                 if (error) throw error;
                 console.log(`✅ Updated blog: ${metadata.title}`);
+                return data;
               } else {
-                const { error } = await supabase
+                const { data, error } = await supabase
                   .from('blogs')
-                  .insert([blogData]);
+                  .insert([blogData])
+                  .select()
+                  .single();
                 
                 if (error) throw error;
                 console.log(`🆕 Created new blog: ${metadata.title}`);
+                return data;
               }
             } catch (error) {
               throw new Error(`Failed to upsert blog ${slug}: ${error.message}`);
+            }
+          }
+
+          async upsertBlogPage(blogId, title, slug, pageOrder, content) {
+            try {
+              const { data: existing } = await supabase
+                .from('blog_pages')
+                .select('id')
+                .eq('blog_id', blogId)
+                .eq('slug', slug)
+                .single();
+
+              const pageData = {
+                blog_id: blogId,
+                title: title,
+                slug: slug,
+                page_order: pageOrder,
+                content: content,
+                updated_at: new Date().toISOString()
+              };
+
+              if (existing) {
+                const { error } = await supabase
+                  .from('blog_pages')
+                  .update(pageData)
+                  .eq('id', existing.id);
+                
+                if (error) throw error;
+              } else {
+                const { error } = await supabase
+                  .from('blog_pages')
+                  .insert([pageData]);
+                
+                if (error) throw error;
+              }
+            } catch (error) {
+              throw new Error(`Failed to upsert blog page ${slug}: ${error.message}`);
             }
           }
         }
