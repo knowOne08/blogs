@@ -347,11 +347,9 @@ jobs:
             const frontYaml = this.getFrontmatterBlock('---\n' + fullContent + '\n---');
             const parsedFront = this.parseCoverAndBasic(frontYaml) || {};
             
-            let title = attributes.title || parsedFront.title;
-            if (!title) {
-              const titleMatch = body.match(/^#\s+(.+)$/m);
-              title = titleMatch ? titleMatch[1] : blogFolder.replace(/-/g, ' ');
-            }
+            // Use the folder name as the title (exact as it appears in GitHub)
+            // This ensures the title matches the GitHub folder structure
+            const title = blogFolder;
             
             let excerpt = attributes.excerpt || attributes.description || parsedFront.description;
             if (!excerpt) {
@@ -375,7 +373,7 @@ jobs:
               date: attributes.date || new Date().toISOString().split('T')[0],
               read_time: `${readTime} min read`,
               status: attributes.status || 'published',
-              // Cover art fields (parsed from YAML)
+              // Cover art fields (raw URLs from YAML - will be processed by backend)
               cover_light: cover.light || null,
               cover_dark: cover.dark || null,
               cover_y: parsedFront.coverY || 0,
@@ -485,6 +483,7 @@ jobs:
                 status: metadata.status,
                 is_multipage: isMultipage,
                 page_count: pageCount,
+                github_folder_name: githubFolder,  // Store actual GitHub folder name for asset URLs
                 updated_at: new Date().toISOString()
               };
 
