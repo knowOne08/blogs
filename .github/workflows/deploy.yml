@@ -1,5 +1,5 @@
 # ========================================
-# Final GitHub Actions Workflow
+# Multi-Page Blog Sync Workflow
 # ========================================
 # 
 # Save this as `.github/workflows/sync-blogs.yml` 
@@ -7,14 +7,25 @@
 #
 # This workflow will:
 # 1. Find all README.md files in blog folders
-# 2. Extract frontmatter metadata (title, description, tags, etc.)
-# 3. Process blog content and keep image paths as-is
-# 4. Sync everything to your Supabase database
+# 2. Check for SUMMARY.md to detect multi-page blogs
+# 3. For multi-page blogs: Create 1 blog entry + N page entries
+# 4. For single-page blogs: Create 1 blog entry + 1 page entry
+# 5. Extract frontmatter metadata (title, description, tags, etc.)
+# 6. Sync everything to your Supabase database (two-table architecture)
+#
+# Blog Structure:
+# - Multi-page: folder with README.md + SUMMARY.md + chapter files
+# - Single-page: folder with just README.md
 #
 # Required Secrets in your GitBook repo:
 # - SUPABASE_URL: Your Supabase project URL
 # - SUPABASE_SERVICE_KEY: Your Supabase service role key
 #
+# Required Database Tables:
+# - blogs: Main blog entries (one per blog)
+# - blog_pages: Individual pages (one or more per blog)
+#
+# See MULTIPAGE_SCHEMA.sql for database setup
 # ========================================
 
 name: Sync Blogs to Portfolio
@@ -22,7 +33,7 @@ name: Sync Blogs to Portfolio
 on:
   push:
     branches: [ main, master ]
-    
+
   workflow_dispatch:
 
 jobs:
@@ -58,33 +69,131 @@ jobs:
 
         const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
+        // Helper: Generate slug from text
+        function generateSlug(text) {
+          return text
+            .toLowerCase()
+            .replace(/[^a-z0-9 -]/g, '')
+            .replace(/\\s+/g, '-')
+            .replace(/-+/g, '-')
+            .trim();
+        }
+
+        // Helper: Check if file exists
+        async function fileExists(filePath) {
+          try {
+            await fs.access(filePath);
+            return true;
+          } catch {
+            return false;
+          }
+        }
+
+        // Helper: Parse SUMMARY.md to get page structure
+        async function parseSummary(summaryPath, folderPath) {
+          const content = await fs.readFile(summaryPath, 'utf-8');
+          const pages = [];
+          
+          // Parse markdown links: * [Title](path/to/file.md)
+          const linkRegex = /\\*\\s*\\[([^\\]]+)\\]\\(([^)]+)\\)/g;
+          let match;
+          
+          while ((match = linkRegex.exec(content)) !== null) {
+            const title = match[1].trim();
+            const relativePath = match[2].trim();
+            const filePath = path.join(folderPath, relativePath);
+            const slug = generateSlug(title);
+            
+            pages.push({ title, slug, filePath, relativePath });
+          }
+          
+          return pages;
+        }
+
+        // Helper: Upsert blog entry
+        async function upsertBlog(blogData) {
+          const { data: existing } = await supabase
+            .from('blogs')
+            .select('id')
+            .eq('slug', blogData.slug)
+            .single();
+
+          if (existing) {
+            const { data, error } = await supabase
+              .from('blogs')
+              .update(blogData)
+              .eq('id', existing.id)
+              .select()
+              .single();
+            
+            if (error) throw error;
+            return data;
+          } else {
+            const { data, error } = await supabase
+              .from('blogs')
+              .insert([blogData])
+              .select()
+              .single();
+            
+            if (error) throw error;
+            return data;
+          }
+        }
+
+        // Helper: Upsert blog page
+        async function upsertBlogPage(pageData) {
+          const { data: existing } = await supabase
+            .from('blog_pages')
+            .select('id')
+            .eq('blog_id', pageData.blog_id)
+            .eq('slug', pageData.slug)
+            .single();
+
+          if (existing) {
+            const { error } = await supabase
+              .from('blog_pages')
+              .update(pageData)
+              .eq('id', existing.id);
+            
+            if (error) throw error;
+          } else {
+            const { error } = await supabase
+              .from('blog_pages')
+              .insert([pageData]);
+            
+            if (error) throw error;
+          }
+        }
+
+        // Main sync function
         (async () => {
           try {
-            // Find all README.md files (GitBook format)
             const files = glob.sync('*/README.md', { 
               ignore: ['.github/**', 'node_modules/**', '.git/**'] 
             });
             
-            console.log(\`📚 Found \${files.length} blog(s) to sync\`);
+            console.log(\`📚 Found \${files.length} blog folder(s) to sync\`);
             
             for (const file of files) {
               try {
                 const folder = path.dirname(file);
-                const content = await fs.readFile(file, 'utf-8');
-                const { attributes, body } = frontMatter(content);
+                const summaryPath = path.join(folder, 'SUMMARY.md');
+                const hasSummary = await fileExists(summaryPath);
                 
-                // Extract title from frontmatter or first heading
+                // Read README.md for main content
+                const readmeContent = await fs.readFile(file, 'utf-8');
+                const { attributes, body } = frontMatter(readmeContent);
+                
+                // Extract metadata
                 let title = attributes.title;
                 if (!title) {
-                  const titleMatch = body.match(/^#\s+(.+)$/m);
+                  const titleMatch = body.match(/^#\\s+(.+)\$/m);
                   title = titleMatch ? titleMatch[1] : folder.replace(/-/g, ' ');
                 }
                 
-                // Use description from frontmatter as excerpt
                 let excerpt = attributes.description || attributes.excerpt || '';
                 if (!excerpt) {
-                  // Fallback: extract first paragraph
-                  const withoutHeadings = body.replace(/^#+\s+.+$/gm, '').trim();
+                  const withoutHeadings = body.replace(/^#+\\s+.+\$/gm, '').trim();
                   const firstParagraph = withoutHeadings.split('\\n\\n')[0];
                   if (firstParagraph) {
                     excerpt = firstParagraph
@@ -98,34 +207,93 @@ jobs:
                   }
                 }
                 
-                // Generate slug and reading time
                 const slug = folder.toLowerCase().replace(/[^a-z0-9-]/g, '-');
                 const wordCount = body.split(/\\s+/).length;
                 const readTime = Math.ceil(wordCount / 200);
                 
-                const blogData = {
-                  title: title.trim(),
-                  excerpt: excerpt.trim(),
-                  content: body,
-                  date: attributes.date || new Date().toISOString().split('T')[0],
-                  read_time: \`\${readTime} min read\`,
-                  tags: JSON.stringify(attributes.tags || []),
-                  featured: attributes.featured || false,
-                  slug: slug,
-                  status: attributes.status || 'published',
-                  github_folder_name: folder,
-                  updated_at: new Date().toISOString()
-                };
-                
-                const { error } = await supabase
-                  .from('blogs')
-                  .upsert(blogData, { onConflict: 'slug' });
-                
-                if (error) {
-                  console.error(\`❌ Error syncing '\${title}': \${error.message}\`);
+                // Process multi-page or single-page blog
+                if (hasSummary) {
+                  console.log(\`  📚 Multi-page blog: \${title}\`);
+                  
+                  // Parse SUMMARY.md to get pages
+                  const pages = await parseSummary(summaryPath, folder);
+                  
+                  // Create blog entry
+                  const blogData = {
+                    title: title.trim(),
+                    excerpt: excerpt.trim(),
+                    date: attributes.date || new Date().toISOString().split('T')[0],
+                    read_time: \`\${readTime} min read\`,
+                    tags: JSON.stringify(attributes.tags || []),
+                    featured: attributes.featured || false,
+                    slug: slug,
+                    status: attributes.status || 'published',
+                    is_multipage: true,
+                    page_count: pages.length,
+                    updated_at: new Date().toISOString()
+                  };
+                  
+                  const blog = await upsertBlog(blogData);
+                  console.log(\`  ✅ Blog entry created/updated\`);
+                  
+                  // Create pages
+                  for (let i = 0; i < pages.length; i++) {
+                    const page = pages[i];
+                    try {
+                      const pageContent = await fs.readFile(page.filePath, 'utf-8');
+                      const pageParsed = frontMatter(pageContent);
+                      
+                      await upsertBlogPage({
+                        blog_id: blog.id,
+                        title: page.title,
+                        slug: page.slug,
+                        page_order: i,
+                        content: pageParsed.body,
+                        updated_at: new Date().toISOString()
+                      });
+                      
+                      console.log(\`    ✅ Page \${i}: \${page.title}\`);
+                    } catch (pageError) {
+                      console.error(\`    ❌ Error syncing page \${page.title}: \${pageError.message}\`);
+                    }
+                  }
+                  
+                  console.log(\`  ✅ Synced multi-page blog: \${title} (\${pages.length} pages)\`);
+                  
                 } else {
-                  console.log(\`✅ Synced: \${title}\`);
+                  console.log(\`  📄 Single-page blog: \${title}\`);
+                  
+                  // Create blog entry
+                  const blogData = {
+                    title: title.trim(),
+                    excerpt: excerpt.trim(),
+                    date: attributes.date || new Date().toISOString().split('T')[0],
+                    read_time: \`\${readTime} min read\`,
+                    tags: JSON.stringify(attributes.tags || []),
+                    featured: attributes.featured || false,
+                    slug: slug,
+                    status: attributes.status || 'published',
+                    is_multipage: false,
+                    page_count: 1,
+                    updated_at: new Date().toISOString()
+                  };
+                  
+                  const blog = await upsertBlog(blogData);
+                  console.log(\`  ✅ Blog entry created/updated\`);
+                  
+                  // Create single page
+                  await upsertBlogPage({
+                    blog_id: blog.id,
+                    title: title.trim(),
+                    slug: 'main',
+                    page_order: 0,
+                    content: body,
+                    updated_at: new Date().toISOString()
+                  });
+                  
+                  console.log(\`  ✅ Synced single-page blog: \${title}\`);
                 }
+                
               } catch (fileError) {
                 console.error(\`❌ Error processing \${file}: \${fileError.message}\`);
               }
@@ -145,3 +313,8 @@ jobs:
         echo "- Repository: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
         echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
         echo "- Timestamp: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Multi-Page Blog Support" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Detects SUMMARY.md for multi-page blogs" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Creates blog entry + multiple pages" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Single-page blogs supported (no SUMMARY.md)" >> $GITHUB_STEP_SUMMARY
