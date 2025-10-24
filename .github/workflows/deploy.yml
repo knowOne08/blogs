@@ -249,7 +249,8 @@ jobs:
 
           extractMetadata(parsed, blogFolder) {
             const { attributes, body } = parsed;
-            
+            console.log(attributes);
+            console.log(body);
             let title = attributes.title;
             if (!title) {
               const titleMatch = body.match(/^#\s+(.+)$/m);
