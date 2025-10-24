@@ -474,6 +474,7 @@ jobs:
                 .eq('slug', slug)
                 .single();
 
+              // Core blog data (fields that should exist in all schemas)
               const blogData = {
                 title: metadata.title,
                 excerpt: metadata.excerpt,
@@ -484,16 +485,25 @@ jobs:
                 featured: metadata.featured,
                 slug: slug,
                 status: metadata.status,
-                github_synced: true,
-                github_folder_name: githubFolder || slug,
-                // Cover art fields
-                cover_light: metadata.cover_light,
-                cover_dark: metadata.cover_dark,
-                cover_y: metadata.cover_y,
-                cover_visible: metadata.cover_visible,
-                cover_size: metadata.cover_size,
                 updated_at: new Date().toISOString()
               };
+
+              // Add cover art fields if they exist
+              if (metadata.cover_light !== undefined) {
+                blogData.cover_light = metadata.cover_light;
+              }
+              if (metadata.cover_dark !== undefined) {
+                blogData.cover_dark = metadata.cover_dark;
+              }
+              if (metadata.cover_y !== undefined) {
+                blogData.cover_y = metadata.cover_y;
+              }
+              if (metadata.cover_visible !== undefined) {
+                blogData.cover_visible = metadata.cover_visible;
+              }
+              if (metadata.cover_size !== undefined) {
+                blogData.cover_size = metadata.cover_size;
+              }
 
               if (existing) {
                 const { error } = await supabase
