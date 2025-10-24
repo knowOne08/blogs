@@ -22,9 +22,7 @@ name: Sync Blogs to Portfolio
 on:
   push:
     branches: [ main, master ]
-    paths:
-      - '**/*.md'
-      - '**/.gitbook/**'
+    
   workflow_dispatch:
 
 jobs:
